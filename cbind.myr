@@ -1,8 +1,9 @@
 use std
 use regex
 
-use "tok"
 use "cpp"
+use "parse"
+use "tok"
 
 const defineprelude = {defs
 	var sb
@@ -84,6 +85,8 @@ const main = {args
 	cb.cpppushts(pp, includeall(cmd.args))
 	cb.cpppushts(pp, ts)
 	cb.cpppushts(pp, defineprelude(defs))
+
+	cb.parse(pp)
 
 	std.put("ts          {}\n", ts)
 	std.put("cmd         {}\n", cmd)
