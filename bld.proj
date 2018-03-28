@@ -1,11 +1,11 @@
 bin cbind =
+    ast.myr
     cbind.myr
-    err.myr
-    bind.myr
-    tok.myr
     cpp.myr
     ctypes.myr
-    ast.myr
-    parse.myr
+    err.myr
     fold.myr
+    hideset.myr
+    parse.myr
+    tok.myr
 ;;

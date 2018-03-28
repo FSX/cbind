@@ -3,12 +3,12 @@ use "ctypes"
 use "err"
 
 
-pkg qc = 
-	
+pkg cb =
+
 	type decl = struct
 		syms : sym#[:]
 	;;
-	
+
 	type func = struct
 		name : byte[:]
 		functy : cfunc#
@@ -17,7 +17,7 @@ pkg qc =
 		params : sym#[:]
 		lblcnt : int
 	;;
-	
+
 	type stmt = union
 		`Sdecl decl
 		`Sexpr expr#
@@ -32,7 +32,7 @@ pkg qc =
 		`Sswitch switchstmt
 		`Sempty
 	;;
-	
+
 	type switchstmt = struct
 		cases : (int64, int)[:]
 		expr : expr#
@@ -40,7 +40,7 @@ pkg qc =
 		defaultlbl : std.option(int)
 		breaklbl : int
 	;;
-	
+
 	type ifstmt = struct
 		cond : expr#
 		iftrue : stmt#
@@ -49,7 +49,7 @@ pkg qc =
 		falselbl : int
 		donelbl : int
 	;;
-	
+
 	type forstmt = struct
 		init : std.option(expr#)
 		cond : std.option(expr#)
@@ -60,7 +60,7 @@ pkg qc =
 		stmtlbl : int
 		breaklbl : int
 	;;
-	
+
 	type whilestmt = struct
 		cond : expr#
 		stmt : stmt#
@@ -73,18 +73,18 @@ pkg qc =
 		stmt : stmt#
 		lbl : int
 	;;
-	
+
 	type syminit = union
 		`Initexpr expr#
 		`Initfunc func#
 	;;
-	
+
 	type constval = union
 		`Constint int64
 		`Constptr (byte[:], int64)
 		`Constblob (uint32, ctype, constval)[:]
 	;;
-	
+
 	type expr = union
 		`Ebinop binop
 		`Elogop logop
@@ -107,11 +107,11 @@ pkg qc =
 		`Econd cond
 		`Einit initlist
 	;;
-	
+
 	type initlist = struct
 		vals : (uint32, expr#)[:]
 	;;
-	
+
 	type cond = struct
 		ty : ctype
 		cond : expr#
@@ -121,7 +121,7 @@ pkg qc =
 		falselbl : int
 		donelbl : int
 	;;
-	
+
 	type cast = struct
 		ty : ctype
 		expr : expr#
@@ -138,13 +138,13 @@ pkg qc =
 		func : expr#
 		args : expr#[:]
 	;;
-	
+
 	type index = struct
 		ty : ctype
 		expr : expr#
 		idx : expr#
 	;;
-	
+
 	type aop = union
 		`Oasn
 		`Oaddasn
@@ -152,7 +152,7 @@ pkg qc =
 		`Oborasn
 		`Obandasn
 	;;
-	
+
 	type bop = union
 		`Oplus
 		`Ominus
@@ -164,7 +164,7 @@ pkg qc =
 		`Oor
 		`Oand
 	;;
-	
+
 	type uop = union
 		`Olnot
 		`Obnot
@@ -172,19 +172,19 @@ pkg qc =
 		`Oaddr
 		`Oderef
 	;;
-	
+
 	type incop = union
 		`Opreinc
 		`Opredec
 		`Opostinc
 		`Opostdec
 	;;
-	
+
 	type logbinop = union
 		`Olor
 		`Oland
 	;;
-	
+
 	type relbinop = union
 		`Oeq
 		`One
@@ -193,61 +193,61 @@ pkg qc =
 		`Oge
 		`Ole
 	;;
-	
+
 	type relop = struct
 		op : relbinop
 		l : expr#
 		r : expr#
 	;;
-	
+
 	type logop = struct
 		op : logbinop
 		l : expr#
 		r : expr#
 	;;
-	
+
 	type incdec = struct
 		ty : ctype
 		op : incop
 		expr : expr#
 	;;
-	
+
 	type binop = struct
 		ty : ctype
 		op : bop
 		l : expr#
 		r : expr#
 	;;
-	
+
 	type ptrop = union
 		`Opadd
 		`Opsub
 	;;
-	
+
 	type ptrarith = struct
 		op : ptrop
 		ptr : expr#
 		amnt : expr#
 	;;
-	
+
 	type ptrdiff = struct
 		l : expr#
 		r : expr#
 	;;
-	
+
 	type unop = struct
 		ty : ctype
 		op : uop
 		operand : expr#
 	;;
-	
+
 	type assign = struct
 		ty : ctype
 		op : aop
 		l : expr#
 		r : expr#
 	;;
-	
+
 	type sclass = union
 		`Sclassextern
 		`Sclasslocal
@@ -256,14 +256,14 @@ pkg qc =
 		`Sclasstypedef
 		`Sclassenum
 	;;
-	
+
 	type sym = struct
 		name : byte[:]
 		ty : ctype
 		sc : sclass
 		init : std.option(syminit)
 	;;
-	
+
 	const nextlbl : (f : func# -> int)
 	const exprtype : (e : expr# -> ctype)
 	const exprloc : (e : expr# -> srcloc)
