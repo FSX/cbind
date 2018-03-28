@@ -1,0 +1,949 @@
+use std
+use iter
+
+use "err"
+use "tok"
+use "hideset"
+
+pkg cb =
+	type pp = struct
+		input : tokstream#[:]
+		incpath : byte[:]
+		sysincpaths : byte[:][:]
+		expanded : tok[:]
+		condstack : condstate[:]
+		macros : std.htab(byte[:], macro)#
+	;;
+
+	type condstate = struct
+		wastrue : bool
+		afterelse : bool
+	;;
+
+	type objmacro = struct
+		toks : tok[:]
+	;;
+
+	type funcmacro = struct
+		params : byte[:][:]
+		toks : tok[:]
+		variadic : bool
+	;;
+
+	type macro = union
+		`Mobj objmacro#
+		`Mfunc funcmacro#
+	;;
+
+	const mkcpp : (incpath : byte[:], sysincpaths : byte[:][:] -> pp#)
+	const cppnext : (pp : pp# -> tok)
+	const cpppushts : (pp : pp#, ts : tokstream# -> void)
+;;
+
+const mkcpp = {incpath, sysincpaths
+	var pp
+
+	pp = std.mk([
+		.input=[][:],
+		.incpath=incpath,
+		.sysincpaths=sysincpaths,
+		.expanded=[][:],
+		.condstack=[][:],
+		.macros=std.mkht()
+	])
+	-> pp
+}
+
+const cppnextnoexp = {pp
+	var tok
+
+	if pp.expanded.len != 0
+		tok = std.slpop(&pp.expanded)
+	else
+		tok = toknext(pp.input[pp.input.len-1])
+	;;
+
+	match tok.kind
+	| `Teof:
+		if pp.input.len > 1
+			std.slpop(&pp.input)
+			-> cppnextnoexp(pp)
+		;;
+	| _:
+	;;
+
+	-> tok
+}
+
+const peeknoexp = {pp
+	var tok
+
+	tok = cppnextnoexp(pp)
+	std.slpush(&pp.expanded, tok)
+
+	-> tok
+}
+
+const cppnext = {pp
+	var mtok, tok, expanded
+
+	mtok = cppnextnoexp(pp)
+	match std.htget(pp.macros, mtok.text)
+	| `std.Some `Mobj m:
+		expanded = subst(m.toks, [][:], [][:], mtok.hs)
+		for var i = expanded.len - 1; i >= 0 ; i--
+			std.slpush(&pp.expanded, expanded[i])
+		;;
+		-> cppnext(pp)
+	| `std.Some `Mfunc m:
+		tok = cppnextnoexp(pp)
+		match tok.kind
+		| `Toparen:
+			var lvl = 1
+			var args = [][:]
+			var nnamedparams = m.params.len
+
+			if m.variadic
+				nnamedparams -= 1
+			;;
+
+			var remainingnamed = nnamedparams
+
+			while true
+				var firsttok = true
+
+				while true
+					tok = cppnextnoexp(pp)
+
+					match tok.kind
+					| `Tcomma:
+						if lvl == 1 && remainingnamed != 0
+							remainingnamed -= 1
+							goto nextparam
+						;;
+					| `Toparen:
+						lvl += 1
+					| `Tcparen:
+						if lvl == 1 && remainingnamed != 0
+							remainingnamed -= 1
+							firsttok = true
+						;;
+						lvl -= 1
+					| _:
+					;;
+
+					if lvl == 0
+						if remainingnamed == 0 && firsttok && m.variadic
+							std.slpush(&args, [][:])
+						;;
+						goto gotparams
+					;;
+
+					if firsttok
+						std.slpush(&args, [][:])
+					;;
+					firsttok = false
+					std.slpush(&args[args.len-1], tok)
+				;;
+
+				:nextparam
+			;;
+
+			:gotparams
+			if args.len != m.params.len
+				err(mtok.loc, "expected {} named macro arguments", nnamedparams)
+			;;
+
+			expanded = subst(m.toks, m.params, args, hsintersect(mtok.hs, tok.hs))
+			for var i = expanded.len - 1; i >= 0 ; i--
+				std.slpush(&pp.expanded, expanded[i])
+			;;
+			-> cppnext(pp)
+		| _:
+			std.slpush(&pp.expanded, tok)
+		;;
+	| `std.None:
+	;;
+
+	match mtok.kind
+	| `Tdirective:
+		directive(pp)
+		-> cppnext(pp)
+	| _:
+	;;
+	-> mtok
+}
+
+const subst = {toks, names : byte[:][:], args : tok[:][:], hs
+	var r
+
+	r = [][:]
+
+	for var i = 0; i < toks.len; i++
+		match std.lsearch(names, toks[i].text, std.strcmp)
+		| `std.Some idx:
+			for var j = 0; j < args[idx].len; j++
+				std.slpush(&r, args[idx][j])
+			;;
+		| `std.None:
+			std.slpush(&r, toks[i])
+		;;
+	;;
+
+	for var i = 0; i < r.len; i++
+		r[i].hs = hsunion(r[i].hs, hs)
+	;;
+
+	-> r
+}
+
+const cpppushts = {pp, ts
+	std.slpush(&pp.input, ts)
+}
+
+const directive = {pp
+	var tok
+
+	tok = cppnext(pp)
+	match tok.text
+	| "include":
+		dirinclude(pp)
+	| "undef":
+		dirundef(pp)
+	| "define":
+		dirdefine(pp)
+	| "ifdef":
+		dirifdef(pp, false)
+	| "ifndef":
+		dirifdef(pp, true)
+	| "if":
+		dirif(pp)
+	| "elif":
+		direlif(pp)
+	| "endif":
+		direndif(pp)
+	| "else":
+		direlse(pp)
+	| "error":
+		direrror(pp)
+	| dir:
+		err(tok.loc, "bad directive {}\n", dir)
+	;;
+}
+
+const evalexpr = {expr
+	-> evalcommaexpr(expr)
+}
+
+const evalcommaexpr = {expr
+	var v = 0
+
+	while true
+		v = evalcondexpr(expr)
+		match expr#[0].kind
+		| `Tcomma:
+			expr# = expr#[1:]
+		| _:
+			break
+		;;
+	;;
+	-> v
+}
+
+const evalcondexpr = {expr
+	var cond, a, b
+
+	cond = 0
+	a = 0
+	b = 0
+
+	cond = evallogandexpr(expr)
+	match expr#[0].kind
+	| `Tqmark:
+		expr# = expr#[1:]
+	| _:
+		-> cond
+	;;
+
+	a = evalcondexpr(expr)
+	match expr#[0].kind
+	| `Tcolon:
+		expr# = expr#[1:]
+	| _:
+		err(expr#[0].loc, "expected ':'\n")
+	;;
+	b = evalcondexpr(expr)
+	if cond != 0
+		-> a
+	else
+		-> b
+	;;
+}
+
+const evallogandexpr = {expr
+	var l, r, f
+
+	l = evallogorexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tland: f = {l, r; if (l != 0) && (r != 0); -> 1 else -> 0 ;;}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evallogorexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evallogorexpr = {expr
+	var l, r, f
+
+	l = evalxorexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tlor: f = {l, r; if (l != 0) || (r != 0); -> 1 else -> 0 ;;}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalxorexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalxorexpr = {expr
+	var l, r, f
+
+	l = evalorexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tbxor: f = {l, r; -> l ^ r}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalorexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalorexpr = {expr
+	var l, r, f
+
+	l = evalandexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tbor: f = {l, r; -> l | r}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalandexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalandexpr = {expr
+	var l, r, f
+
+	l = evaleqlexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tband: f = {l, r; -> l & r}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evaleqlexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evaleqlexpr = {expr
+	var l, r, f
+
+	l = evalrelexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Teq: f = {l, r; if l == r; -> 1 else -> 0 ;;}
+		| `Tne: f = {l, r; if l != r; -> 1 else -> 0 ;;}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalrelexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalrelexpr = {expr
+	var l, r, f
+
+	l = evalshiftexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tgt: f = {l, r; if l > r; -> 1 else -> 0 ;;}
+		| `Tlt: f = {l, r; if l < r; -> 1 else -> 0 ;;}
+		| `Tge: f = {l, r; if l >= r; -> 1 else -> 0 ;;}
+		| `Tle: f = {l, r; if l <= r; -> 1 else -> 0 ;;}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalshiftexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalshiftexpr = {expr
+	var l, r, f
+
+	l = evaladdexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tshl: f = {l, r; -> l << r}
+		| `Tshr: f = {l, r; -> l >> r}
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evaladdexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evaladdexpr = {expr
+	var l, r, f
+
+	l = evalmulexpr(expr)
+	while true
+		match expr#[0].kind
+		| `Tplus:  f = {l, r; -> l + r }
+		| `Tminus: f = {l, r; -> l - r }
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalmulexpr(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalmulexpr = {expr
+	var l, r, f
+
+	l = evalunop(expr)
+	while true
+		match expr#[0].kind
+		| `Tmul: f = {l, r; -> l * r }
+		| `Tdiv: f = {l, r; -> l / r }
+		| `Tmod: f = {l, r; -> l % r }
+		| _:
+			break
+		;;
+		expr# = expr#[1:]
+		r = evalunop(expr)
+		l = f(l, r)
+	;;
+	-> l
+}
+
+const evalunop = {expr
+	var f
+
+	match expr#[0].kind
+	| `Tminus:
+		f = {v; -> -v}
+	| `Tlnot:
+		f = {v; if v == 0; -> 1 else -> 0 ;;}
+	| _:
+		-> evalprimaryexpr(expr)
+	;;
+	expr# = expr#[1:]
+	-> f(evalunop(expr))
+}
+
+const evalprimaryexpr = {expr
+	var v
+
+	match expr#[0].kind
+	| `Tchrlit c:
+		expr# = expr#[1:]
+		-> (c : int64)
+	| `Twchrlit c:
+		expr# = expr#[1:]
+		-> (c : int64)
+	| `Tintlit n:
+		expr# = expr#[1:]
+		-> n
+	| `Toparen:
+		expr# = expr#[1:]
+		v = evalexpr(expr)
+		match expr#[0].kind
+		| `Tcparen:
+			expr# = expr#[1:]
+		| _:
+			err(expr#[0].loc, "expected ')'\n")
+		;;
+		-> v
+	| _:
+		err(expr#[0].loc, "expected expression\n")
+	;;
+}
+
+const readcppifexpr = {pp
+	var expr, tok, name
+
+	expr = [][:]
+
+	while true
+		tok = cppnext(pp)
+		match tok.kind
+		| `Tenddirective:
+			std.slpush(&expr, tok)
+			break
+		| _:
+		;;
+		match tok.text
+		| "defined":
+			tok = cppnextnoexp(pp)
+			match tok.text
+			| "(":
+				tok = cppnextnoexp(pp)
+				name = tok.text
+				if !validmacroparam(name)
+					err(tok.loc, "expected a name\n")
+				;;
+				tok = cppnextnoexp(pp)
+				match tok.text
+				| ")":
+				| _:
+					err(tok.loc, "expected ')'\n")
+				;;
+			| _:
+				name = tok.text
+			;;
+			if std.hthas(pp.macros, name)
+				std.slpush(&expr, [.kind=`Tintlit 1, .text="1", .loc=tok.loc])
+			else
+				std.slpush(&expr, [.kind=`Tintlit 0, .text="0", .loc=tok.loc])
+			;;
+		| text:
+			if validmacroparam(text)
+				std.slpush(&expr, [.kind=`Tintlit 0, .text="0", .loc=tok.loc])
+			else
+				std.slpush(&expr, tok)
+			;;
+		;;
+	;;
+
+	-> expr
+}
+
+const dirif = {pp
+	var expr, cond
+
+	std.slpush(&pp.condstack, [.wastrue=false, .afterelse=false])
+
+	expr = readcppifexpr(pp)
+	cond = evalexpr(&expr)
+	match expr[0].kind
+	| `Tenddirective:
+	| _:
+		err(expr[0].loc, "junk after expression\n")
+	;;
+
+	if cond != 0
+		pp.condstack[pp.condstack.len-1].wastrue = true
+	else
+		skipcond(pp)
+	;;
+}
+
+const dirifdef = {pp, invert
+	var name, tok, cond
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+		err(tok.loc, "expected name\n")
+	| _:
+	;;
+	name = tok.text
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+	| _:
+		err(tok.loc, "expected end of directive\n")
+	;;
+
+	std.slpush(&pp.condstack, [.wastrue=false, .afterelse=false])
+	cond = std.hthas(pp.macros, name)
+	if invert
+		cond = !cond
+	;;
+	if cond
+		pp.condstack[pp.condstack.len-1].wastrue = true
+	else
+		skipcond(pp)
+	;;
+}
+
+const direlif = {pp
+	var expr, cond
+
+	if pp.condstack.len == 0 || pp.condstack[pp.condstack.len-1].afterelse
+		// XXX: get the position of the elif
+		err(cppnext(pp).loc, "unexpected #elif\n")
+	;;
+
+	if pp.condstack[pp.condstack.len-1].wastrue
+		skipcond(pp)
+		-> void
+	;;
+
+	expr = readcppifexpr(pp)
+	cond = evalexpr(&expr)
+	match expr[0].kind
+	| `Tenddirective:
+	| _:
+		err(expr[0].loc, "junk after expression\n")
+	;;
+
+	if cond != 0
+		pp.condstack[pp.condstack.len-1].wastrue = true
+	else
+		skipcond(pp)
+	;;
+}
+
+const direlse = {pp
+	var tok
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+	| _: err(tok.loc, "junk at end of else directive\n")
+	;;
+	if pp.condstack.len == 0 || pp.condstack[pp.condstack.len-1].afterelse
+		 err(tok.loc, "unexpected #else\n")
+	;;
+	pp.condstack[pp.condstack.len-1].afterelse = true
+	if pp.condstack[pp.condstack.len-1].wastrue
+		skipcond(pp)
+	;;
+}
+
+const direndif = {pp
+	var tok
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+	| _: err(tok.loc, "junk at end of endif directive\n")
+	;;
+	if pp.condstack.len == 0
+		err(tok.loc, "unexpected #endif\n")
+	;;
+	std.slpop(&pp.condstack)
+}
+
+const skipcond = {pp
+	var tok1, tok2
+
+	var depth = 1
+	while true
+		tok1 = cppnextnoexp(pp)
+		match tok1.kind
+		| `Tdirective:
+		| `Teof:
+			err(tok1.loc, "got eof, expected #endif\n")
+		| _:
+			continue
+		;;
+		tok2 = cppnextnoexp(pp)
+		match tok2.text
+		| "if":
+			depth += 1
+		| "ifdef":
+			depth += 1
+		| "ifndef":
+			depth += 1
+		| "else":
+			if depth == 1
+				break
+			;;
+		| "elif":
+			if depth == 1
+				break
+			;;
+		| "endif":
+			depth -= 1
+			if depth == 0
+				break
+			;;
+		| _:
+		;;
+	;;
+	std.slpush(&pp.expanded, tok2)
+	std.slpush(&pp.expanded, tok1)
+}
+
+const findsysinc = {pp, header
+	for ipath : pp.sysincpaths
+		var fullpath = std.pathjoin([ipath, header][:])
+		if std.fexists(fullpath)
+			-> `std.Some fullpath
+		;;
+		std.slfree(fullpath)
+	;;
+	-> `std.None
+}
+
+const findinc = {pp, header
+	var incpath
+
+	incpath = std.pathjoin([pp.incpath, header][:])
+	if std.fexists(incpath)
+		-> `std.Some incpath
+	;;
+	std.slfree(incpath)
+	-> findsysinc(pp, header)
+}
+
+const dirinclude = {pp
+	var tok, path, ts
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tsysincl s:
+		match findsysinc(pp, s)
+		| `std.Some found:
+			path = found
+		| `std.None:
+			err(tok.loc, "{} not in include path\n", s)
+		;;
+	| `Tstrlit s:
+		match findinc(pp, s)
+		| `std.Some found:
+			path = found
+		| `std.None:
+			err(tok.loc, "{} not in include path\n", s)
+		;;
+	| _:
+		err(tok.loc, "bad include, expected a string\n")
+	;;
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+	| _:
+		err(tok.loc, "junk '{}' at end of include directive\n", tok.text)
+	;;
+	ts = tokinit(path)
+	cpppushts(pp, ts)
+}
+
+const validmacroparam = {s
+	var first, rest
+
+	if s.len == 0
+		-> false
+	;;
+
+	(first, rest) = std.charstep(s)
+
+	if !std.isalpha(first) && first != '_'
+		-> false
+	;;
+
+	for c : std.bychar(rest)
+		if !std.isalnum(c) && c != '_'
+			-> false
+		;;
+	;;
+	-> true
+}
+
+const dirdefine = {pp
+	var loc, toks, tok, name, m
+	var isfuncmacro, mparams
+	var mparamset
+	var variadic
+
+	isfuncmacro = false
+	variadic = false
+	mparams = [][:]
+	toks = [][:]
+
+
+	tok = cppnextnoexp(pp)
+	loc = tok.loc
+	match tok.kind
+	| `Tenddirective:
+		err(tok.loc, "define expects something to define\n")
+	| _:
+		name = tok.text
+	;;
+
+	tok = peeknoexp(pp)
+	match (tok.kind, tok.ws)
+	| (`Toparen, false):
+		cppnextnoexp(pp)
+		isfuncmacro = true
+		tok = cppnextnoexp(pp)
+		match tok.kind
+		| `Tcparen:
+			goto gotparams
+		| _:
+		;;
+		while true
+			match tok.kind
+			| `Tellipsis:
+				variadic = true
+				std.slpush(&mparams, "__VA_ARGS__")
+				tok = cppnextnoexp(pp)
+				break
+			| _:
+			;;
+			if !validmacroparam(tok.text)
+				break
+			;;
+			std.slpush(&mparams, tok.text)
+			tok = cppnextnoexp(pp)
+			match tok.kind
+			| `Tcomma:
+			| _:
+				break
+			;;
+			tok = cppnextnoexp(pp)
+		;;
+		:gotparams
+		match tok.kind
+		| `Tcparen:
+		| _:
+			err(tok.loc, "expected ')' to end macro param list\n")
+		;;
+	| _:
+	;;
+
+	while true
+		tok = cppnextnoexp(pp)
+		match tok.kind
+		| `Tenddirective:
+			break
+		| _:
+			std.slpush(&toks, tok)
+		;;
+	;;
+
+	if isfuncmacro
+		mparamset = std.mkht()
+		for param : mparams
+			if std.hthas(mparamset, param)
+				err(loc, "macro argument {} appears multiple times", param)
+			;;
+			std.htput(mparamset, param, void)
+		;;
+		std.htfree(mparamset)
+
+		m = `Mfunc std.mk([.params=mparams, .toks=toks, .variadic=variadic])
+	else
+		m = `Mobj std.mk([.toks=toks])
+	;;
+
+	match std.htget(pp.macros, name)
+	| `std.Some oldm:
+		if !identicalmacros(oldm, m)
+			// GCC and friends treat this as a warning, i think we can be stricter.
+			err(loc, "redefinition of macro {}\n", name)
+		;;
+	| `std.None:
+	;;
+
+	std.htput(pp.macros, name, m)
+
+}
+
+const identicalmacros = {m1, m2
+	match (m1, m2)
+	| (`Mfunc _, `Mobj _): -> false
+	| (`Mobj _, `Mfunc _): -> false
+	| (`Mfunc f1, `Mfunc f2):
+
+		if f1.variadic != f2.variadic
+			-> false
+		;;
+
+		if f1.params.len != f2.params.len
+			-> false
+		;;
+
+		for (t1, t2) : iter.byzip(f1.params, f2.params)
+			if !std.eq(t1, t2)
+				-> false
+			;;
+		;;
+
+		if f1.toks.len != f2.toks.len
+			-> false
+		;;
+
+
+		for var i = 0; i < f1.toks.len; i++
+			if !std.eq(f1.toks[i].text, f2.toks[i].text)
+				-> false
+			;;
+		;;
+
+	| (`Mobj o1, `Mobj o2):
+		if o1.toks.len != o2.toks.len
+			-> false
+		;;
+		for var i = 0; i < o1.toks.len; i++
+			if !std.eq(o1.toks[i].text, o2.toks[i].text)
+				-> false
+			;;
+		;;
+	;;
+
+	-> true
+}
+
+const dirundef = {pp
+	var tok, name
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+		err(tok.loc, "#undef expects something to undefine\n")
+	| _:
+		name = tok.text
+	;;
+
+	tok = cppnextnoexp(pp)
+	match tok.kind
+	| `Tenddirective:
+	| _:
+		err(tok.loc, "junk after #undef\n")
+	;;
+
+	std.htdel(pp.macros, name)
+}
+
+const direrror = {pp
+	var tok
+
+	tok = cppnext(pp)
+	err(tok.loc, "TODO, gather strings")
+}
+

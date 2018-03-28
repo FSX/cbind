@@ -1,0 +1,62 @@
+use std
+use "ctypes"
+use "ast"
+
+pkg cb =
+	const foldexpr : (e : expr# -> std.option(constval))
+;;
+
+const foldexpr = {e
+	match e
+	| &(`Eident &[.sc=`Sclassenum, .name=name, .ty=`Tyenum &(`std.Some enum)]):
+		-> `std.Some `Constint std.get(std.htget(enum.membs, name))
+	| &(`Ewchrlit c):
+		-> `std.Some `Constint (c : int64)
+	| &(`Echrlit c):
+		-> `std.Some `Constint (c : int64)
+	| &(`Ecast c):
+		-> foldexpr(c.expr)
+	| &(`Eintlit v):
+		-> `std.Some `Constint v
+	| &(`Eunop [.op=`Oaddr, .operand=&(`Eident sym)]):
+		match sym.sc
+		| `Sclassglobal:
+			-> `std.Some `Constptr (sym.name, 0)
+		| _:
+			-> `std.None
+		;;
+	| &(`Eunop [.op=`Oneg, .operand=expr]):
+		match foldexpr(expr)
+		| `std.Some `Constint v:
+			-> `std.Some `Constint -v
+		| _:
+			-> `std.None
+		;;
+	| &(`Ebinop [.op=op, .l=l, .r=r]):
+		match (op, foldexpr(l), foldexpr(r))
+		| (`Oplus, `std.Some `Constint c1,  `std.Some `Constint c2):
+			-> `std.Some `Constint (c1 + c2)
+		| (`Oshl, `std.Some `Constint c1,  `std.Some `Constint c2):
+			-> `std.Some `Constint (c1 << c2)
+		| (_, `std.None, _):
+			-> `std.None
+		| (_, _, `std.None):
+			-> `std.None
+		| _:
+			-> `std.None
+		;;
+	| &(`Einit initlist):
+		var vals = [][:]
+		for (offset, sube) : initlist.vals
+			match foldexpr(sube)
+			| `std.Some v:
+				std.slpush(&vals, (offset, exprtype(sube), v))
+			| `std.None:
+				-> `std.None
+			;;
+		;;
+		-> `std.Some `Constblob vals
+	| _:
+		-> `std.None
+	;;
+}

@@ -1,0 +1,353 @@
+use std
+use "ctypes"
+use "err"
+
+
+pkg qc = 
+	
+	type decl = struct
+		syms : sym#[:]
+	;;
+	
+	type func = struct
+		name : byte[:]
+		functy : cfunc#
+		body : stmt#[:]
+		locals : sym#[:]
+		params : sym#[:]
+		lblcnt : int
+	;;
+	
+	type stmt = union
+		`Sdecl decl
+		`Sexpr expr#
+		`Sreturn std.option(expr#)
+		`Sblock stmt#[:]
+		`Sif ifstmt
+		`Sfor forstmt
+		`Swhile whilestmt
+		`Sdowhile whilestmt
+		`Slabeled labeledstmt
+		`Sgoto int
+		`Sswitch switchstmt
+		`Sempty
+	;;
+	
+	type switchstmt = struct
+		cases : (int64, int)[:]
+		expr : expr#
+		stmt : stmt#
+		defaultlbl : std.option(int)
+		breaklbl : int
+	;;
+	
+	type ifstmt = struct
+		cond : expr#
+		iftrue : stmt#
+		iffalse : std.option(stmt#)
+		truelbl : int
+		falselbl : int
+		donelbl : int
+	;;
+	
+	type forstmt = struct
+		init : std.option(expr#)
+		cond : std.option(expr#)
+		step : std.option(expr#)
+		stmt : stmt#
+		condlbl : int
+		contlbl : int
+		stmtlbl : int
+		breaklbl : int
+	;;
+	
+	type whilestmt = struct
+		cond : expr#
+		stmt : stmt#
+		contlbl : int
+		breaklbl : int
+		stmtlbl : int
+	;;
+
+	type labeledstmt = struct
+		stmt : stmt#
+		lbl : int
+	;;
+	
+	type syminit = union
+		`Initexpr expr#
+		`Initfunc func#
+	;;
+	
+	type constval = union
+		`Constint int64
+		`Constptr (byte[:], int64)
+		`Constblob (uint32, ctype, constval)[:]
+	;;
+	
+	type expr = union
+		`Ebinop binop
+		`Elogop logop
+		`Erelop relop
+		`Eptrarith ptrarith
+		`Eptrdiff ptrdiff
+		`Eunop unop
+		`Eassign assign
+		`Eintlit int64
+		`Echrlit char
+		`Ewchrlit char
+		`Estrlit byte[:]
+		`Eident sym#
+		`Eidx index
+		`Esel selector
+		`Ecall call
+		`Ecast cast
+		`Eincdec incdec
+		`Esizeof int
+		`Econd cond
+		`Einit initlist
+	;;
+	
+	type initlist = struct
+		vals : (uint32, expr#)[:]
+	;;
+	
+	type cond = struct
+		ty : ctype
+		cond : expr#
+		iftrue : expr#
+		iffalse : expr#
+		truelbl : int
+		falselbl : int
+		donelbl : int
+	;;
+	
+	type cast = struct
+		ty : ctype
+		expr : expr#
+	;;
+
+	type selector = struct
+		ty : ctype
+		expr : expr#
+		off : uint32
+	;;
+
+	type call = struct
+		functy : cfunc#
+		func : expr#
+		args : expr#[:]
+	;;
+	
+	type index = struct
+		ty : ctype
+		expr : expr#
+		idx : expr#
+	;;
+	
+	type aop = union
+		`Oasn
+		`Oaddasn
+		`Osubasn
+		`Oborasn
+		`Obandasn
+	;;
+	
+	type bop = union
+		`Oplus
+		`Ominus
+		`Oshl
+		`Omul
+		`Odiv
+		`Omod
+		`Oxor
+		`Oor
+		`Oand
+	;;
+	
+	type uop = union
+		`Olnot
+		`Obnot
+		`Oneg
+		`Oaddr
+		`Oderef
+	;;
+	
+	type incop = union
+		`Opreinc
+		`Opredec
+		`Opostinc
+		`Opostdec
+	;;
+	
+	type logbinop = union
+		`Olor
+		`Oland
+	;;
+	
+	type relbinop = union
+		`Oeq
+		`One
+		`Olt
+		`Ogt
+		`Oge
+		`Ole
+	;;
+	
+	type relop = struct
+		op : relbinop
+		l : expr#
+		r : expr#
+	;;
+	
+	type logop = struct
+		op : logbinop
+		l : expr#
+		r : expr#
+	;;
+	
+	type incdec = struct
+		ty : ctype
+		op : incop
+		expr : expr#
+	;;
+	
+	type binop = struct
+		ty : ctype
+		op : bop
+		l : expr#
+		r : expr#
+	;;
+	
+	type ptrop = union
+		`Opadd
+		`Opsub
+	;;
+	
+	type ptrarith = struct
+		op : ptrop
+		ptr : expr#
+		amnt : expr#
+	;;
+	
+	type ptrdiff = struct
+		l : expr#
+		r : expr#
+	;;
+	
+	type unop = struct
+		ty : ctype
+		op : uop
+		operand : expr#
+	;;
+	
+	type assign = struct
+		ty : ctype
+		op : aop
+		l : expr#
+		r : expr#
+	;;
+	
+	type sclass = union
+		`Sclassextern
+		`Sclasslocal
+		`Sclassglobal
+		`Sclassstatic
+		`Sclasstypedef
+		`Sclassenum
+	;;
+	
+	type sym = struct
+		name : byte[:]
+		ty : ctype
+		sc : sclass
+		init : std.option(syminit)
+	;;
+	
+	const nextlbl : (f : func# -> int)
+	const exprtype : (e : expr# -> ctype)
+	const exprloc : (e : expr# -> srcloc)
+	const islval : (e : expr# -> bool)
+	const stmtloc : (s : stmt# -> srcloc)
+;;
+
+// XXX this label count is global until qbe supports func local labels.
+var lblcnt = 0
+
+const nextlbl = {f
+	-> lblcnt++
+	//-> f.lblcnt++
+}
+
+const exprtype = {e
+	match e
+	| &(`Econd cond): -> cond.ty
+	| &(`Ecast cast): -> cast.ty
+	| &(`Esel sel): -> sel.ty
+	| &(`Eident sym): -> sym.ty
+	| &(`Ebinop bop): -> bop.ty
+	| &(`Eunop uop): -> uop.ty
+	| &(`Eptrdiff _): -> `Tylong
+	| &(`Eptrarith arith): -> exprtype(arith.ptr)
+	| &(`Eassign asn): -> asn.ty
+	| &(`Eintlit _): -> `Tyint
+	| &(`Elogop _): -> `Tyint
+	| &(`Erelop _): -> `Tyint
+	| &(`Estrlit _): -> `Typtr std.mk(`Tychar)
+	| &(`Echrlit _): -> `Tychar
+	| &(`Ewchrlit _): -> `Tyshort
+	| &(`Eidx idx): -> idx.ty
+	| &(`Ecall call): -> call.functy.rty
+	| &(`Eincdec incdec): -> exprtype(incdec.expr)
+	| &(`Esizeof _): -> `Tyint
+	;;
+}
+
+
+const exprloc = {e
+	match e
+	| &(`Econd _):
+	| &(`Ecast _):
+	| &(`Esel _):
+	| &(`Eident _):
+	| &(`Ebinop _):
+	| &(`Eunop _):
+	| &(`Eptrdiff _):
+	| &(`Eptrarith _):
+	| &(`Eassign _):
+	| &(`Eintlit _):
+	| &(`Elogop _):
+	| &(`Erelop _):
+	| &(`Estrlit _):
+	| &(`Echrlit _):
+	| &(`Ewchrlit _):
+	| &(`Eidx _):
+	| &(`Ecall _):
+	| &(`Eincdec _):
+	| &(`Esizeof _):
+	;;
+	-> [.file=[][:], .line=0, .col=0 ]
+}
+
+
+const stmtloc = {s
+	-> [.file=[][:], .line=0, .col=0 ]
+}
+
+const islval = {n
+	match n#
+	| `Eunop unop:
+		match unop.op
+		| `Oderef: -> true
+		| _: -> false
+		;;
+	| `Eident sym:
+		match sym.sc
+		| `Sclassenum: -> false
+		| _: -> true
+		;;
+	| `Eidx _: -> true
+	| `Esel _: -> true
+	|_: -> false
+	;;
+}
