@@ -8,8 +8,7 @@ use "fold"
 use "bind"
 
 pkg cb =
-	generic parse : (pp : pp#, b : @t -> decl[:]) :: cb.cdefcb @t
-	//generic eq	: (ctx : ctx#, a : @t, b : @t -> void) :: std.equatable @t
+	const parse : (pp : pp#, callbacks : cb.cdefcb# -> decl[:])
 ;;
 
 const mklocal = {p, name, ty, init : std.option(syminit) // Type inference error
@@ -72,6 +71,7 @@ type parser = struct
 	conts : int[:]
 	switchs : switchstmt#[:]
 	curfunc : func#
+	callbacks : cb.cdefcb#
 ;;
 
 const inglobalscope = {p
@@ -191,7 +191,7 @@ const lookup = {p, name
 	-> `std.None
 }
 
-generic parse = {pp, b
+const parse = {pp, callbacks
 	var p : parser#
 	var globals
 
@@ -203,6 +203,7 @@ generic parse = {pp, b
 		.breaks = [][:],
 		.conts = [][:],
 		.switchs = [][:],
+		.callbacks = callbacks,
 	])
 	pushscope(p)
 	p.tok = cppnext(pp)
@@ -529,14 +530,14 @@ const parsetagtype = {p
 			if tagtype == tagstruct || tagtype == tagunion
 				var pbody = std.mk(`std.None)
 				ty = `Tystruct pbody
-				std.put("CB struct {}: {}\n", name, ty)
+				p.callbacks.tystruct() // TODO: Struct.
 				declaretag(p, name, (tagtype, ty))
 				parsestructbody(p, tagname, pbody, tagtype == tagunion)
 				-> ty
 			else
 				var pbody = std.mk(`std.None)
 				ty = `Tyenum pbody
-				std.put("CB enum {}: {}\n", name, ty)
+				p.callbacks.tyenum() // TODO: Enum.
 				declaretag(p, name, (tagtype, ty))
 				parseenumbody(p, tagname, pbody)
 				-> ty
@@ -1264,19 +1265,20 @@ const parsedeclaration = {p
 				sym = mkextern(p, n, ty)
 				declare(p, loc, n, sym)
 			| `Sclassglobal:
-				// TODO: Do some matching.
-				std.put("CB func/var {} : {}\n", n, ty) // FIXME: And global variables.
+				match ty
+				| `cb.Tyfunc cfunc: p.callbacks.tyfunc(n, cfunc)
+				| _: /* TODO: global variables + init */
+				;;
+
 				sym = mkglobal(p, n, ty, init)
 				declare(p, loc, n, sym)
 			| `Sclassstatic:
-				// NOTE(fsx): I only want globals!
 				if inglobalscope(p)
-					std.put("CB static (global) {} : {}\n", n, ty)
+					p.callbacks.tystatic() // TODO: Global static variables + init.
 				;;
 				sym = mkstatic(p, n, ty, init)
 				declare(p, loc, n, sym)
 			| `Sclasslocal:
-				// NOTE(fsx): This is a local var. Don't need it.
 				if inglobalscope(p)
 					err(loc, "cannot declare a local outside of a function")
 				;;
@@ -1284,8 +1286,7 @@ const parsedeclaration = {p
 				sym = mklocal(p, n, ty, `std.None)
 				declare(p, loc, n, sym)
 			| `Sclasstypedef:
-				std.put("CB typedef {}\n", n)
-				//std.put("DEBUG Sclasstypedef: {}\n", n)
+				p.callbacks.tydefn() // TODO: Typdef.
 				var nty = `Tydefn std.mk([.name=n, .base=ty])
 				sym = std.mk([.name=n, .ty=nty, .sc=`Sclasstypedef])
 				declaretype(p, loc, n, nty)

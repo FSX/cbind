@@ -100,17 +100,14 @@ const main = {args
 	cb.cpppushts(pp, defineprelude(defs))
 	cb.cpppushts(pp, cb.tokinits(builtins, "<builtins>"))
 
-	var binder = cb.mkbind()
-
-	cb.parse(pp, binder)
-
-	// std.put("ts          {}\n", ts)
-	// std.put("cmd         {}\n", cmd)
-	// std.put("incpath     {}\n", incpath)
-	// std.put("sysincpaths {}\n", sysincpaths)
-	// std.put("defs        {}\n", defs)
-	// std.put("bindpkg     {}\n", bindpkg)
-	// std.put("exports     {}\n", exports)
+	cb.parse(pp, &[
+		.tyfunc={n, t; std.put("tyfunc: {} : {}\n", n, t);},
+		.tyenum={; std.put("tyenum\n");},
+		.tystruct={; std.put("tystruct\n");},
+		.tystatic={; std.put("tystatic\n");},
+		.tyglobal={; std.put("tyglobal\n");},
+		.tydefn={; std.put("tydefn\n");},
+	])
 
 	for r : exports
 		regex.free(r)

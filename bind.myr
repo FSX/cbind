@@ -1,50 +1,12 @@
+use "ctypes"
+
 pkg cb =
-    trait cdefcb @a =
-        tyfunc : (a : @a -> void)
-        tyenum : (a : @a -> void)
-        tystruct : (a : @a -> void)
-        tystatic : (a : @a -> void)
-        tyglobal : (a : @a -> void)
-        tydefn : (a : @a -> void)
+    type cdefcb = struct
+        tyfunc : (name : byte[:], cfunc : cb.cfunc# -> void)
+        tyenum : (-> void)
+        tystruct : (-> void)
+        tystatic : (-> void)
+        tyglobal : (-> void)
+        tydefn : (-> void)
     ;;
-
-    type myrbind = struct
-        yes : int
-        // output buffer for myr code
-        // output buffer for c code
-    ;;
-
-    impl cdefcb myrbind#
-
-    const mkbind : (-> myrbind#)
-;;
-
-const mkbind = {
-    -> &[.yes=1]
-}
-
-impl cdefcb myrbind# =
-    tyfunc = {m
-
-    }
-
-    tyenum = {m
-
-    }
-
-    tystruct = {m
-
-    }
-
-    tystatic = {m
-
-    }
-
-    tyglobal = {m
-
-    }
-
-    tydefn = {m
-
-    }
 ;;
